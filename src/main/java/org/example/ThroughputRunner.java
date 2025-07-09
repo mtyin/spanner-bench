@@ -106,7 +106,7 @@ public class ThroughputRunner {
         executor);
   }
 
-  // insert or ignore
+  // insert or ignore with return: also a RMW
   private static ApiFuture<Long> findOrCreateNode(
       AsyncRunner runner, String label, String key, JsonObject details, ExecutorService executor) {
 
@@ -118,6 +118,36 @@ public class ThroughputRunner {
         runner,
         """
         INSERT OR IGNORE INTO GraphNode (label, key, details) VALUES (@label, @key, @details)
+        THEN RETURN details
+        """,
+        params,
+        executor);
+  }
+
+  // insert or ignore with return: also a RMW
+  private static ApiFuture<Long> findOrCreateEdge(
+      AsyncRunner runner,
+      String label,
+      String key,
+      String edgeLabel,
+      String otherNodeLabel,
+      String otherNodeKey,
+      JsonObject details,
+      ExecutorService executor) {
+
+    Map<String, Value> params = new HashMap<>();
+    params.put("label", Value.string(label));
+    params.put("key", Value.string(key));
+    params.put("edge_label", Value.string(edgeLabel));
+    params.put("other_node_label", Value.string(otherNodeLabel));
+    params.put("other_node_key", Value.string(otherNodeKey));
+    params.put("details", Value.json(details.toString()));
+    return dmlAsyncRunner(
+        runner,
+        """
+        INSERT OR IGNORE INTO GraphEdge
+          (label, key, edge_label, other_node_label, other_node_key, details)
+        VALUES (@label, @key, @edge_label, @other_node_label, @other_node_key, @details)
         THEN RETURN details
         """,
         params,
@@ -378,7 +408,7 @@ public class ThroughputRunner {
         "experiment",
         true,
         "Experiment mode: blindUpdateNode, insertOrUpdateNodeUpdCount, findOrCreateNode,"
-            + " insertOrUpdateEdgeUpdCount, findSubgraph");
+            + " insertOrUpdateEdgeUpdCount, findSubgraph, findOrCreateEdge");
     options.addOption("n", "numKeys", true, "Total number of deterministic keys in the set");
     options.addOption("nr", "numOperations", true, "Total number of operations");
     options.addOption("l", "numLabels", true, "Total number of deterministic labels in the set");
@@ -459,21 +489,36 @@ public class ThroughputRunner {
           future = insertOrUpdateNodeUpdCount(runner, label, key, hardcodedDetails, workerExecutor);
         } else if (experiment.equals("findOrCreateNode")) {
           future = findOrCreateNode(runner, label, key, hardcodedDetails, workerExecutor);
+        } else if (experiment.equals("findOrCreateEdge")) {
+          String edgeLabel = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
+          String otherNodeLabel =
+              String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
+          String otherNodeKey = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numKeys);
+          future =
+              findOrCreateEdge(
+                  runner,
+                  label,
+                  key,
+                  edgeLabel,
+                  otherNodeLabel,
+                  otherNodeKey,
+                  hardcodedDetails,
+                  workerExecutor);
         } else if (experiment.equals("blindUpdateNode")) {
           future = blindUpdateNode(runner, label, key, hardcodedDetails, workerExecutor);
         } else if (experiment.equals("insertOrUpdateEdgeUpdCount")) {
           String edgeLabel = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
-          String otherNodekey = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numKeys);
-          String otherNodelabel =
+          String otherNodeLabel =
               String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
+          String otherNodeKey = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numKeys);
           future =
               insertOrUpdateEdgeUpdCount(
                   runner,
                   label,
                   key,
                   edgeLabel,
-                  otherNodelabel,
-                  otherNodekey,
+                  otherNodeLabel,
+                  otherNodeKey,
                   hardcodedDetails,
                   workerExecutor);
         } else {
