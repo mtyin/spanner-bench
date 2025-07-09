@@ -29,9 +29,9 @@ import org.apache.commons.cli.ParseException;
 
 public class ThroughputRunner {
 
-  private static final int DEFAULT_NUMBER_OF_RUNS = 5000000;
-  private static final String DEFAULT_WORKER_THREAD_POOL_SIZE = "1024";
-  private static final int MAX_IN_FLIGHT_OPERATIONS = 5000;
+  private static final int DEFAULT_NUMBER_OF_RUNS = 1000000;
+  private static final String DEFAULT_CONCURRENCY = "10";
+  private static final int DEFAULT_AVG_FANOUT = 10;
 
   public static JsonObject create500ByteJsonObject() {
     JsonObject dataObject = new JsonObject();
@@ -298,6 +298,76 @@ public class ThroughputRunner {
         workerExecutor);
   }
 
+  // Remember to run ANALYZE after graph generation to keep statistics up-to-date.
+  private static void generateGraph(
+      DatabaseClient dbClient,
+      int numLabels,
+      int numKeys,
+      int averageFanout,
+      int concurrency,
+      ExecutorService executor)
+      throws java.lang.InterruptedException {
+    Semaphore semaphore = new Semaphore(concurrency);
+    AtomicInteger completedCount = new AtomicInteger(0);
+    AtomicInteger failureCount = new AtomicInteger(0);
+    AtomicInteger numRows = new AtomicInteger(0);
+    JsonObject hardcodedDetails = create500ByteJsonObject();
+    int numNodes = numLabels * numKeys;
+    int numEdges = numNodes * averageFanout;
+    int total = numNodes + numEdges;
+    System.out.printf(
+        "Generate graph with %d nodes and %d edges...\n",
+        numLabels * numKeys, numLabels * numKeys * averageFanout);
+
+    int numPartitions = 100;
+    int numOpPerPartition = (numNodes + numPartitions - 1) / numPartitions;
+    for (int p = 0; p < numOpPerPartition; ++p) {
+      for (int q = 0; q < numPartitions; ++q) {
+        semaphore.acquire();
+        int offset = q * numOpPerPartition + p;
+        int i = offset / numKeys;
+        int j = offset % numKeys;
+        AsyncRunner runner = getRunner(dbClient, "generateGraph", -1);
+        ApiFuture<Long> future =
+            insertOrUpdateNodeUpdCount(
+                runner, String.valueOf(i), String.valueOf(j), hardcodedDetails, executor);
+        handleDmlResult(future, total, semaphore, completedCount, failureCount, numRows, executor);
+      }
+    }
+    for (int p = 0; p < numOpPerPartition; ++p) {
+      for (int q = 0; q < numPartitions; ++q) {
+        int offset = q * numOpPerPartition + p;
+        int i = offset / numKeys;
+        int j = offset % numKeys;
+        for (int k = 0; k < averageFanout; ++k) {
+          semaphore.acquire();
+          String edgeLabel = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
+          String otherNodeLabel =
+              String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
+          String otherNodeKey = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numKeys);
+          AsyncRunner runner = getRunner(dbClient, "generateGraph", -1);
+          ApiFuture<Long> future =
+              insertOrUpdateEdgeUpdCount(
+                  runner,
+                  String.valueOf(i),
+                  String.valueOf(j),
+                  edgeLabel,
+                  otherNodeLabel,
+                  otherNodeKey,
+                  hardcodedDetails,
+                  executor);
+          handleDmlResult(
+              future, total, semaphore, completedCount, failureCount, numRows, executor);
+        }
+      }
+    }
+
+    System.out.println("All requests submitted. Waiting for the final operations to complete...");
+    while (completedCount.get() < total) {
+      Thread.sleep(1);
+    }
+  }
+
   public static void main(String[] args) throws ParseException {
     org.apache.commons.cli.Options options = new org.apache.commons.cli.Options();
     options.addOption("p", "project", true, "project name");
@@ -313,7 +383,7 @@ public class ThroughputRunner {
     options.addOption("nr", "numOperations", true, "Total number of operations");
     options.addOption("l", "numLabels", true, "Total number of deterministic labels in the set");
     options.addOption("c", "maxCommitDelay", true, "Max commit delay in milliseconds");
-    options.addOption("nw", "numWorkerThread", true, "Num worker thread");
+    options.addOption("cc", "concurrency", true, "Concurrency");
 
     CommandLineParser parser = new DefaultParser();
     CommandLine commandLine = parser.parse(options, args);
@@ -327,13 +397,12 @@ public class ThroughputRunner {
             commandLine.getOptionValue("numOperations", String.valueOf(DEFAULT_NUMBER_OF_RUNS)));
     int numKeys =
         Integer.parseInt(commandLine.getOptionValue("numKeys", String.valueOf(numOperations)));
-    int numLabels = Integer.parseInt(commandLine.getOptionValue("numLabels", String.valueOf(10)));
+    int numLabels = Integer.parseInt(commandLine.getOptionValue("numLabels", String.valueOf(1)));
     int maxCommitDelayMillis = Integer.parseInt(commandLine.getOptionValue("maxCommitDelay", "-1"));
-    int numWorkerThread =
-        Integer.parseInt(
-            commandLine.getOptionValue("numWorkerThread", DEFAULT_WORKER_THREAD_POOL_SIZE));
+    int concurrency =
+        Integer.parseInt(commandLine.getOptionValue("concurrency", DEFAULT_CONCURRENCY));
 
-    Semaphore semaphore = new Semaphore(MAX_IN_FLIGHT_OPERATIONS);
+    Semaphore semaphore = new Semaphore(concurrency);
     AtomicInteger completedCount = new AtomicInteger(0);
     AtomicInteger failureCount = new AtomicInteger(0);
     AtomicInteger numRows = new AtomicInteger(0);
@@ -346,12 +415,18 @@ public class ThroughputRunner {
         SpannerOptions.newBuilder().setProjectId(project).setNumChannels(numChannels).build();
 
     Spanner spanner = spannerOptions.getService();
-    ExecutorService workerExecutor = Executors.newFixedThreadPool(numWorkerThread);
+    ExecutorService workerExecutor = Executors.newFixedThreadPool(concurrency);
 
     try {
       DatabaseClient dbClient =
           spanner.getDatabaseClient(
               DatabaseId.of(spannerOptions.getProjectId(), instance, database));
+      if (experiment.equals("generateGraph")) {
+        generateGraph(
+            dbClient, numLabels, numKeys, DEFAULT_AVG_FANOUT, concurrency, workerExecutor);
+        return;
+      }
+
       System.out.printf(
           "Starting throughput test in '%s' mode with %,d operations...%n",
           experiment, numOperations);
@@ -360,8 +435,8 @@ public class ThroughputRunner {
       long startTime = System.currentTimeMillis();
       for (int i = 0; i < numOperations; i++) {
         semaphore.acquire();
-        String key = String.valueOf(UUID.randomUUID().hashCode() % numKeys);
-        String label = String.valueOf(UUID.randomUUID().hashCode() % numLabels);
+        String key = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numKeys);
+        String label = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
 
         if (experiment.equals("findSubgraph")) {
           ApiFuture<List<List<Value>>> future = findSubgraph(dbClient, label, key, workerExecutor);
@@ -387,9 +462,10 @@ public class ThroughputRunner {
         } else if (experiment.equals("blindUpdateNode")) {
           future = blindUpdateNode(runner, label, key, hardcodedDetails, workerExecutor);
         } else if (experiment.equals("insertOrUpdateEdgeUpdCount")) {
-          String edgeLabel = String.valueOf(UUID.randomUUID().hashCode() % numLabels);
-          String otherNodekey = String.valueOf(UUID.randomUUID().hashCode() % numKeys);
-          String otherNodelabel = String.valueOf(UUID.randomUUID().hashCode() % numLabels);
+          String edgeLabel = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
+          String otherNodekey = String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numKeys);
+          String otherNodelabel =
+              String.valueOf(Math.abs(UUID.randomUUID().hashCode()) % numLabels);
           future =
               insertOrUpdateEdgeUpdCount(
                   runner,
@@ -433,7 +509,7 @@ public class ThroughputRunner {
       System.out.printf("Throughput: %.2f operations/second%n", throughput);
       System.out.printf(
           "MaxCommitDelayMillis: %d, WorkerThreadPoolSize: %d\n",
-          maxCommitDelayMillis, numWorkerThread);
+          maxCommitDelayMillis, concurrency);
       System.out.println("-------------------------------------------------");
 
     } catch (Exception e) {
