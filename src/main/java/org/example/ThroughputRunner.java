@@ -7,6 +7,7 @@ import com.google.cloud.spanner.AsyncResultSet;
 import com.google.cloud.spanner.AsyncRunner;
 import com.google.cloud.spanner.DatabaseClient;
 import com.google.cloud.spanner.DatabaseId;
+import com.google.cloud.spanner.Mutation;
 import com.google.cloud.spanner.Spanner;
 import com.google.cloud.spanner.SpannerOptions;
 import com.google.cloud.spanner.Statement;
@@ -151,6 +152,51 @@ public class ThroughputRunner {
         THEN RETURN details
         """,
         params,
+        executor);
+  }
+
+  private static ApiFuture<Long> findOrCreateEdgeMutation(
+      AsyncRunner runner,
+      String label,
+      String key,
+      String edgeLabel,
+      String otherNodeLabel,
+      String otherNodeKey,
+      JsonObject details,
+      ExecutorService executor) {
+    return runner.runAsync(
+        txn -> {
+          ApiFuture<Struct> existingEdge =
+              txn.readRowAsync(
+                  "GraphEdge",
+                  Key.of(label, key, edgeLabel, otherNodeLabel, otherNodeKey),
+                  ImmutableList.of("details"));
+          ApiFuture<Long> result =
+              ApiFutures.transformAsync(
+                  existingEdge,
+                  (edge) -> {
+                    if (edge != null) {
+                      return ApiFutures.immediateFuture(0);
+                    }
+                    return txn.bufferAsync(
+                        Mutation.newInsertBuilder("GraphEdge")
+                            .set("label")
+                            .to(label)
+                            .set("key")
+                            .to(key)
+                            .set("edge_label")
+                            .to(edgeLabel)
+                            .set("other_node_label")
+                            .to(otherNodeLabel)
+                            .set("other_node_key")
+                            .to(otherNodeKey)
+                            .set("details")
+                            .to(details)
+                            .build());
+                  },
+                  executor);
+          return result;
+        },
         executor);
   }
 
