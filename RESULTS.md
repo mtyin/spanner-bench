@@ -44,12 +44,24 @@
 - Latency: 53ms @ 99th, 39ms @ 50th
 - Screenshot: screen/94SfrWtXkwKWMQb
 
-# Query
+# Query-1
 
 - Parameter:
-    - Concurrency: 5, NumOperations 1M, findSubgraph
-    - FindSubgraph returns 24 rows on average (fan-in + fan-out)
-- Utilization: 65% utilization at us-south1 (close to 0 in the other region)
-- Throughput: 632 op per second
-- Latency: 9.3ms @ 99th, 5.8ms @ 50th
-- Screenshot: screen/B2o2FZr2LHsHeMx
+    - Concurrency: 15, NumOperations 1M, findSubgraph
+    - Client @ us-south1-a
+- Utilization: 45% utilization at us-south1 (close to 0 in the other region)
+- Throughput: 2.9k op per second
+- Latency: 4.4ms @ 99th, 2.6ms @ 50th
+- Screenshot: screen/BoaAZorJcy7Jtrp
+- FindSubgraph returns 26 rows on average (fan-in + fan-out): screen/BLidWUH8CGci5Fr
+
+# Query-2
+
+- Parameter:
+    - Concurrency: 75, NumOperations 1M, findSubgraph
+    - Client @ us-east4-a
+- Utilization: 50% utilization at us-east4 (close to 0 in the leader region)
+- Throughput: 1.85k op per second
+- Latency: 57ms @ 99th, 40ms @ 50th
+- Screenshot: screen/cthvJiZgXMWWhW3
+- FindSubgraph returns 26 rows on average (fan-in + fan-out): screen/sNF4aP39s5E2VZb
